@@ -1,0 +1,4 @@
+review_id,order_id,review_score,review_comment_title,review_comment_message,review_creation_date,review_answer_timestamp
+rev-late-1,order-late,2,Atraso,Entrega demorou muito,2018-01-11 10:00:00,2018-01-12 10:00:00
+rev-late-2,order-late,5,,Produto bom,2018-01-11 11:00:00,2018-01-12 11:00:00
+rev-early,order-early,4,"   ","   ",2018-02-02 10:00:00,2018-02-03 10:00:00

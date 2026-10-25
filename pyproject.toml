@@ -1,0 +1,10 @@
+[project]
+name = "olist-rag-ingestion"
+version = "0.1.0"
+description = "Extraction and ingestion layer for the Olist RAG project."
+requires-python = ">=3.11"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
