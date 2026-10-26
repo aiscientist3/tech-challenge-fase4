@@ -1,6 +1,11 @@
-# Camada de ingestão Olist
+# Voice of Customer com RAG — Olist
 
-Esta pasta é a camada de extração e indexação de um projeto de RAG sobre o e-commerce brasileiro da Olist. Ela lê os CSV, monta documentos em linguagem natural e grava uma coleção persistente no Chroma. A consulta, o prompt, a geração com LLM e a interface ficam para a próxima etapa, que vai ler esta coleção.
+Projeto de RAG sobre as avaliações do e-commerce brasileiro da Olist (Tech Challenge, Fase 4). O repositório tem duas partes:
+
+- **Ingestão** (`src/`, `scripts/`): lê os CSV, monta documentos em linguagem natural e grava uma coleção persistente no Chroma.
+- **Frontend** (`frontend/`): interface de chat em que o usuário faz perguntas, filtra por metadados e vê as avaliações usadas como evidência.
+
+Ainda falta a rota `POST /chat`, que vai recuperar da coleção e gerar a resposta com um LLM. Até ela existir, o front funciona em modo mock.
 
 ## Visão geral
 
@@ -53,6 +58,19 @@ Python 3.12.3 (o código pede 3.11+). As versões abaixo são as que `requiremen
 | pytest | 9.1.1 | Testes com CSV mínimos em `tests/fixtures/` |
 
 O modelo padrão é `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`. Para um modelo de API, defina `EMBEDDING_PROVIDER=openai` e instale `langchain-openai` à parte. A instalação padrão permanece local.
+
+### Frontend
+
+Node 20+ (testado com 24.13.1). As versões vêm de `frontend/package.json`.
+
+| Biblioteca | Versão | Função |
+| --- | --- | --- |
+| Vite | 8.3 | Servidor de desenvolvimento, build e proxy de `/chat` |
+| TypeScript | 7.0 | Código do front, sem framework |
+| Tailwind CSS | 4.3 | Estilos utilitários, pelo plugin `@tailwindcss/vite` |
+| daisyUI | 5.7 | Componentes e o tema `voc` |
+| @tailwindcss/typography | 0.5 | Formatação do texto da resposta |
+| @fontsource-variable/montserrat | 5.3 | Fonte servida localmente |
 
 ## Preparação dos dados
 
@@ -176,6 +194,7 @@ Depois da amostra, `make ingest-full` para de propósito: a coleção está com 
 - Semente `RANDOM_SEED=42` para `--sample`.
 - Modelo, lote, chunk e flags estão em [`.env.example`](.env.example).
 - Comandos: `make test`, `make ingest-sample`, `make inspect`.
+- Frontend: `cd frontend && npm install && npm run build`. O `package-lock.json` trava as versões.
 
 `make test` passou com 20 testes depois da implementação.
 
@@ -229,9 +248,36 @@ query: pagamento com boleto
      Order 0a472c47d928bf4cd8b6a7a30345eeb7 placed on 2018-08-30 by a customer from sumare/SP. Status: canceled. Payment: voucher in 1 installment, total R$ 490.99. Estimated delivery: 2018-10-02. Review score: 3/5. Review title: Produto com ...
 ```
 
+## Frontend do chat
+
+Interface em `frontend/` para conversar com a base. Os detalhes (estrutura, contrato completo e modo mock) estão em [`frontend/README.md`](frontend/README.md).
+
+```bash
+cd frontend
+npm install
+cp .env.example .env
+npm run dev
+```
+
+Abra http://localhost:5173. Com `VITE_USE_MOCK=true` (o padrão), as respostas são simuladas e vêm de avaliações fictícias. Com `false`, o Vite repassa `POST /chat` para `API_PROXY_TARGET` (padrão `http://localhost:8000`).
+
+O que a tela cobre, ligado aos requisitos do desafio:
+
+- **Respostas com evidências:** cada resposta lista as fontes recuperadas (nota, categoria, data, trecho, `order_id` e distância). As citações `[n]` no texto apontam para elas.
+- **Evidência insuficiente:** quando o backend devolve `insufficient_evidence: true`, a resposta aparece com um aviso.
+- **Metadados:** filtros por tipo de documento, faixa de nota, categoria e ano, com os mesmos nomes dos metadados da coleção (`doc_type`, `review_score`, `product_category`, `purchase_year`).
+
+Resumo do contrato que o backend deve implementar:
+
+```text
+POST /chat
+  { question, history[], filters{ doc_type?, review_score_min?, review_score_max?, product_category?, purchase_year? } }
+→ { answer, insufficient_evidence, sources[{ id, doc_type, order_id, review_score, product_category, purchase_date, score, excerpt }] }
+```
+
 ## Limitações e próximos passos
 
-A próxima camada deve recuperar desta coleção e gerar a resposta. Este repositório para na indexação. `inspect_collection.py` só mostra que a coleção responde a uma busca por similaridade.
+A próxima camada é a rota `POST /chat`: recuperar desta coleção, aplicar os filtros recebidos e gerar a resposta seguindo o contrato de [`frontend/README.md`](frontend/README.md). A interface já existe, mas responde só em modo mock. `inspect_collection.py` só mostra que a coleção responde a uma busca por similaridade.
 
 O que a verificação acima já mostra, e que a recuperação vai precisar tratar:
 

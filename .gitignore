@@ -20,3 +20,6 @@ data/processed/*
 # Local vector index.
 data/chroma/*
 !data/chroma/.gitkeep
+
+# Local Claude Code settings (preview launch config).
+.claude/
