@@ -1,0 +1,5 @@
+order_id,order_item_id,product_id,seller_id,shipping_limit_date,price,freight_value
+order-late,1,product-bed,seller-sp,2017-12-28 00:00:00,10.00,2.00
+order-late,2,product-furniture,seller-mg,2017-12-28 00:00:00,30.00,5.00
+order-early,1,product-bed,seller-sp,2018-01-20 00:00:00,15.00,1.00
+order-open,1,product-unknown,seller-sp,2018-02-25 00:00:00,8.00,1.00
