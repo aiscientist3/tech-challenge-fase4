@@ -1,0 +1,57 @@
+@import "tailwindcss";
+@import "@fontsource-variable/montserrat";
+@plugin "@tailwindcss/typography";
+@plugin "daisyui" {
+  themes: false;
+}
+
+/* Dark, square, magenta-accented identity: black surfaces, thin borders,
+   uppercase labels with wide tracking. */
+@plugin "daisyui/theme" {
+  name: "voc";
+  default: true;
+  prefersdark: true;
+  color-scheme: dark;
+
+  --color-base-100: #0e0f10;
+  --color-base-200: #000000;
+  --color-base-300: #2a2d31;
+  --color-base-content: #e8edf0;
+
+  --color-primary: #ed145b;
+  --color-primary-content: #ffffff;
+  --color-secondary: #acc1cc;
+  --color-secondary-content: #0e0f10;
+  --color-accent: #ed145b;
+  --color-accent-content: #ffffff;
+  --color-neutral: #1a1c1f;
+  --color-neutral-content: #acc1cc;
+
+  --color-info: #acc1cc;
+  --color-info-content: #0e0f10;
+  --color-success: #3ddc97;
+  --color-success-content: #0e0f10;
+  --color-warning: #f5b83d;
+  --color-warning-content: #0e0f10;
+  --color-error: #ff4d5e;
+  --color-error-content: #0e0f10;
+
+  --radius-selector: 0rem;
+  --radius-field: 0rem;
+  --radius-box: 0rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+@theme {
+  --font-sans: "Montserrat Variable", ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer components {
+  .eyebrow {
+    @apply text-[0.68rem] font-semibold uppercase tracking-[0.2em];
+  }
+}

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="voc">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voz do Cliente · Olist</title>
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body class="h-dvh bg-base-200 font-sans text-base-content antialiased">
+    <div class="flex h-full flex-col">
+      <header class="flex h-14 shrink-0 items-center gap-3 border-b border-base-300 bg-base-200 px-4 sm:px-6">
+        <h1 class="min-w-0 flex-1 truncate text-sm font-light uppercase tracking-[0.15em] sm:text-base sm:tracking-[0.3em]">
+          Voz<span class="text-primary">/</span>do<span class="text-primary">/</span>Cliente
+        </h1>
+        <span id="mock-badge" class="eyebrow hidden border border-primary px-2 py-1 text-primary" title="Respostas simuladas em src/mock.ts">
+          <span class="sm:hidden">Mock</span><span class="hidden sm:inline">Modo mock</span>
+        </span>
+        <button id="clear-btn" type="button" class="btn btn-outline btn-sm eyebrow border-base-content/40 hover:border-primary hover:bg-primary">
+          Nova<span class="hidden sm:inline">&nbsp;conversa</span>
+        </button>
+      </header>
+
+      <div class="flex h-10 shrink-0 items-center gap-4 bg-primary px-4 text-primary-content sm:px-6">
+        <span class="text-sm font-bold uppercase tracking-wider">Tech Challenge <span class="font-light">Fase 4</span></span>
+        <span class="eyebrow hidden opacity-90 sm:inline">Voice of Customer com RAG · Olist 2016–2018</span>
+      </div>
+
+      <div class="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col gap-4 p-2 sm:p-4 lg:flex-row lg:gap-6 lg:p-6">
+        <aside class="lg:w-72 lg:shrink-0">
+          <details id="filters-panel" class="collapse collapse-arrow border border-primary/70 bg-base-100">
+            <summary class="collapse-title eyebrow flex items-center gap-2 text-secondary">
+              Filtros <span id="filter-count" class="badge badge-primary badge-sm hidden"></span>
+            </summary>
+            <form id="filters-form" class="collapse-content flex flex-col gap-1">
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend eyebrow text-secondary">Tipo de documento</legend>
+                <select name="doc_type" class="select select-sm [--input-color:var(--color-primary)] w-full">
+                  <option value="">Todos</option>
+                  <option value="review">Avaliações</option>
+                  <option value="order">Pedidos</option>
+                  <option value="category_summary">Resumos por categoria</option>
+                  <option value="state_summary">Resumos por UF</option>
+                </select>
+              </fieldset>
+
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend eyebrow text-secondary">Nota da avaliação</legend>
+                <div class="flex items-center gap-2">
+                  <select name="review_score_min" class="select select-sm [--input-color:var(--color-primary)]" aria-label="Nota mínima">
+                    <option value="">mín.</option>
+                    <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+                  </select>
+                  <span class="text-base-content/50">a</span>
+                  <select name="review_score_max" class="select select-sm [--input-color:var(--color-primary)]" aria-label="Nota máxima">
+                    <option value="">máx.</option>
+                    <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+                  </select>
+                </div>
+              </fieldset>
+
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend eyebrow text-secondary">Categoria do produto</legend>
+                <input
+                  name="product_category"
+                  list="categories"
+                  class="input input-sm w-full [--input-color:var(--color-primary)]"
+                  placeholder="ex.: bed_bath_table"
+                  autocomplete="off"
+                />
+                <datalist id="categories"></datalist>
+              </fieldset>
+
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend eyebrow text-secondary">Ano da compra</legend>
+                <select name="purchase_year" class="select select-sm [--input-color:var(--color-primary)] w-full">
+                  <option value="">Todos</option>
+                  <option>2016</option><option>2017</option><option>2018</option>
+                </select>
+              </fieldset>
+
+              <p id="filter-error" class="text-sm text-error hidden" role="alert"></p>
+              <button type="reset" class="eyebrow mt-3 self-start text-primary hover:underline">Limpar filtros →</button>
+            </form>
+          </details>
+        </aside>
+
+        <main class="flex min-h-0 flex-1 flex-col border border-base-300 bg-base-100">
+          <div id="messages" class="flex flex-1 flex-col gap-6 overflow-y-auto p-4 sm:p-8" aria-live="polite">
+            <section id="welcome" class="flex flex-col gap-8 py-4 sm:py-8">
+              <div class="flex flex-col gap-3">
+                <span class="eyebrow text-primary">Pergunte à base de avaliações</span>
+                <h2 class="text-3xl font-light uppercase leading-tight tracking-wide sm:text-4xl">
+                  O que os clientes<br /><span class="font-bold">estão dizendo?</span>
+                </h2>
+                <p class="max-w-xl text-secondary">
+                  Faça perguntas em linguagem natural sobre as avaliações da Olist. Cada resposta mostra as avaliações
+                  usadas como evidência.
+                </p>
+              </div>
+              <div class="grid gap-3 sm:grid-cols-2">
+                <button type="button" class="group flex flex-col gap-2 border border-base-300 p-4 text-left transition-colors hover:border-primary disabled:opacity-50" data-example="Quais são os principais problemas relatados pelos clientes?">
+                  <span class="eyebrow text-primary">Reclamações</span>
+                  <span class="text-sm">Quais são os principais problemas relatados pelos clientes?</span>
+                  <span class="eyebrow mt-auto text-base-content/40 group-hover:text-primary">Perguntar →</span>
+                </button>
+                <button type="button" class="group flex flex-col gap-2 border border-base-300 p-4 text-left transition-colors hover:border-primary disabled:opacity-50" data-example="O que os clientes relatam sobre problemas relacionados à entrega?">
+                  <span class="eyebrow text-primary">Entrega</span>
+                  <span class="text-sm">O que os clientes relatam sobre problemas relacionados à entrega?</span>
+                  <span class="eyebrow mt-auto text-base-content/40 group-hover:text-primary">Perguntar →</span>
+                </button>
+                <button type="button" class="group flex flex-col gap-2 border border-base-300 p-4 text-left transition-colors hover:border-primary disabled:opacity-50" data-example="Quais aspectos da experiência de compra são mais elogiados?">
+                  <span class="eyebrow text-primary">Elogios</span>
+                  <span class="text-sm">Quais aspectos da experiência de compra são mais elogiados?</span>
+                  <span class="eyebrow mt-auto text-base-content/40 group-hover:text-primary">Perguntar →</span>
+                </button>
+                <button type="button" class="group flex flex-col gap-2 border border-base-300 p-4 text-left transition-colors hover:border-primary disabled:opacity-50" data-example="Existem padrões recorrentes nas avaliações sobre a qualidade dos produtos?">
+                  <span class="eyebrow text-primary">Qualidade</span>
+                  <span class="text-sm">Existem padrões recorrentes nas avaliações sobre a qualidade dos produtos?</span>
+                  <span class="eyebrow mt-auto text-base-content/40 group-hover:text-primary">Perguntar →</span>
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <form id="chat-form" class="flex items-end gap-2 border-t border-base-300 p-3 sm:p-4">
+            <textarea
+              id="question"
+              rows="1"
+              class="textarea min-h-0 flex-1 resize-none overflow-y-hidden border-base-300 bg-base-200 [--input-color:var(--color-primary)]"
+              placeholder="Faça uma pergunta sobre as avaliações…"
+              aria-label="Pergunta"
+            ></textarea>
+            <button id="send-btn" type="submit" class="btn btn-primary eyebrow">Enviar →</button>
+          </form>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>
