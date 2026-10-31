@@ -1,8 +1,8 @@
-"""Search the collection with one question and print the retrieval payload.
+"""Search the collection and print the retrieval JSON plus the prompt.
 
 The question is cleaned, filters named in it are applied, and the same
-embedding model that built the collection ranks the reviews. The JSON is the
-input the next stage uses. No answer is generated.
+embedding model that built the collection ranks the reviews. The prompt is
+assembled from those reviews. No language model is called.
 
 Example:
     python scripts/retrieve.py "Em São Paulo quais são os motivos de nota baixa?"
@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from rag.config import DOC_TYPES, Settings, configure_logging
+from rag.generation.prompt import build_generation
 from rag.ingestion.indexer import CollectionConfigError, build_embeddings
 from rag.retrieval.filters import RetrievalFilters
 from rag.retrieval.payload import to_payload
@@ -49,7 +50,14 @@ def main(argv: list[str] | None = None) -> None:
     except (CollectionNotFoundError, CollectionConfigError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
-    print(json.dumps(to_payload(result), ensure_ascii=False, indent=2))
+    payload = to_payload(result)
+    generated = build_generation(payload, min_reviews=policy.min_keep)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print("\n---\n")
+    if generated.prompt is None:
+        print(generated.refusal)
+        return
+    print(generated.prompt.render(), end="")
 
 
 def _filters(doc_type: str) -> RetrievalFilters:
