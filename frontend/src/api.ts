@@ -49,7 +49,7 @@ export interface ChatResponse {
 
 export const USE_MOCK = import.meta.env.VITE_USE_MOCK === "true";
 
-const TIMEOUT_MS = 60_000;
+const TIMEOUT_MS = 120_000;
 
 export class ChatError extends Error {}
 
