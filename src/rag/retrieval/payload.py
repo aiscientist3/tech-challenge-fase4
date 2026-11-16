@@ -9,6 +9,7 @@ prompt can quote what the user wrote.
 from __future__ import annotations
 
 from rag.retrieval.filters import RetrievalFilters
+from rag.retrieval.group import tally_text
 from rag.retrieval.select import RetrievalResult, RetrievedDocument
 
 
@@ -22,6 +23,13 @@ def to_payload(result: RetrievalResult) -> dict[str, object]:
         },
         "retrieved_reviews": [_review(document) for document in result.selected],
         "insufficient_evidence": result.insufficient_evidence,
+        "compare_left": list(result.compare_left),
+        "compare_right": list(result.compare_right),
+        "score_tally": (
+            tally_text(result.score_groups, result.score_focus, result.compare_left, result.compare_right)
+            if result.score_focus
+            else ""
+        ),
     }
 
 

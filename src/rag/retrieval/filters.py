@@ -33,6 +33,7 @@ class RetrievalFilters:
     product_category: str | None = None
     purchase_year: int | None = None
     customer_state: str | None = None
+    customer_states: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.doc_type is not None and self.doc_type not in DOC_TYPES:
@@ -55,6 +56,12 @@ class RetrievalFilters:
             if uf not in CUSTOMER_STATES:
                 raise ValueError("customer_state must be a Brazilian UF.")
             object.__setattr__(self, "customer_state", uf)
+        if self.customer_states:
+            cleaned = tuple(dict.fromkeys(uf.strip().upper() for uf in self.customer_states))
+            unknown = [uf for uf in cleaned if uf not in CUSTOMER_STATES]
+            if unknown:
+                raise ValueError("customer_states must contain Brazilian UFs.")
+            object.__setattr__(self, "customer_states", cleaned)
 
     def describe(self) -> str:
         """Return a short label of the active filters, or `nenhum`."""
@@ -71,6 +78,8 @@ class RetrievalFilters:
             parts.append(f"purchase_year={self.purchase_year}")
         if self.customer_state is not None:
             parts.append(f"customer_state={self.customer_state}")
+        elif self.customer_states:
+            parts.append("customer_state=" + "|".join(self.customer_states))
         return ", ".join(parts) if parts else "nenhum"
 
 
@@ -87,6 +96,8 @@ def to_chroma_where(filters: RetrievalFilters | None) -> dict[str, object] | Non
         clauses.append({"purchase_year": int(filters.purchase_year)})
     if filters.customer_state is not None:
         clauses.append({"customer_state": filters.customer_state})
+    elif filters.customer_states:
+        clauses.append({"customer_state": {"$in": list(filters.customer_states)}})
     # This Chroma build accepts one operator per field. A closed range becomes
     # $in so "notas 1 a 3" is a single clause, which is what the query supports.
     if filters.review_score_min is not None and filters.review_score_max is not None:

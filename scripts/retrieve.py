@@ -75,9 +75,9 @@ def _parser() -> argparse.ArgumentParser:
         choices=[*DOC_TYPES, "all"],
         help="Metadata filter applied before the search. Default: review.",
     )
-    parser.add_argument("--candidate-k", type=int, default=20)
+    parser.add_argument("--candidate-k", type=int, default=40)
     parser.add_argument("--k", type=int, default=10)
-    parser.add_argument("--max-distance", type=float, default=0.65)
+    parser.add_argument("--max-distance", type=float, default=0.75)
     parser.add_argument("--min-keep", type=int, default=2)
     return parser
 

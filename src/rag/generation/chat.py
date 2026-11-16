@@ -7,7 +7,8 @@ The frontend already expects `answer`, `insufficient_evidence`, and `sources`.
 from __future__ import annotations
 
 from rag.generation.answer import draft_answer
-from rag.generation.prompt import REFUSAL
+from rag.generation.ground import ground_answer
+from rag.generation.prompt import REFUSAL, without_instruction_echo
 from rag.retrieval.payload import to_payload
 from rag.retrieval.select import RetrievalResult, RetrievedDocument
 
@@ -17,32 +18,51 @@ _COMMENT_MARK = "Review comment:"
 def to_chat_response(
     result: RetrievalResult,
     *,
-    max_reviews: int = 4,
+    max_reviews: int | None = None,
     answer: str | None = None,
 ) -> dict[str, object]:
     """Build the chat JSON from one retrieval result.
 
     `answer` replaces the quoted comments when a model has already written
-    the reply. The refusal path ignores that text.
+    the reply. The refusal path ignores that text. Every selected review is
+    returned unless `max_reviews` sets a smaller cap.
     """
-    if max_reviews < 1:
+    if max_reviews is not None and max_reviews < 1:
         raise ValueError("max_reviews must be >= 1.")
     payload = to_payload(result)
     reviews = payload.get("retrieved_reviews")
-    if isinstance(reviews, list):
+    if isinstance(reviews, list) and max_reviews is not None:
         payload["retrieved_reviews"] = reviews[:max_reviews]
-    draft = draft_answer(payload, max_reviews=max_reviews).rstrip("\n")
-    insufficient = result.insufficient_evidence or draft == REFUSAL
-    if insufficient or answer is None or not answer.strip():
-        answer = draft
+    limit = len(result.selected) if max_reviews is None else max_reviews
+    has_tally = bool(result.score_focus) and bool(payload.get("score_tally"))
+    if limit < 1 and not has_tally:
+        return {"answer": REFUSAL, "insufficient_evidence": True, "sources": []}
+    draft = REFUSAL if limit < 1 else draft_answer(payload, max_reviews=limit).rstrip("\n")
+    insufficient = result.insufficient_evidence or (draft == REFUSAL and not has_tally)
+    if answer and answer.strip() and not result.insufficient_evidence:
+        answer = without_instruction_echo(answer.strip(), question=result.original_question) or REFUSAL
+        if not has_tally:
+            answer = ground_answer(answer, _states(reviews, limit))
     else:
-        answer = answer.strip()
-    sources = [] if insufficient else [_source(doc) for doc in result.selected[:max_reviews]]
+        answer = draft
+    sources = [] if insufficient else [_source(doc) for doc in result.selected[:limit]]
     return {
         "answer": answer,
         "insufficient_evidence": insufficient,
         "sources": sources,
     }
+
+
+def _states(reviews: object, limit: int) -> list[str]:
+    if not isinstance(reviews, list):
+        return []
+    states: list[str] = []
+    for item in reviews[:limit]:
+        if not isinstance(item, dict):
+            continue
+        state = item.get("customer_state")
+        states.append(state.strip().upper() if isinstance(state, str) else "")
+    return states
 
 
 def _source(document: RetrievedDocument) -> dict[str, object]:

@@ -27,7 +27,7 @@ def complete(prompt: Prompt, *, model: str | None = None, timeout: float = 120) 
             {"role": "system", "content": prompt.system},
             {"role": "user", "content": prompt.user},
         ],
-        "options": {"temperature": 0.2, "num_predict": 320},
+        "options": {"temperature": 0.1, "num_predict": 320},
     }
     request = urllib.request.Request(
         OLLAMA_URL,

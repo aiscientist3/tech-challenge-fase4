@@ -16,7 +16,7 @@ def draft_answer(
     payload: dict[str, object],
     *,
     min_reviews: int = 2,
-    max_reviews: int = 4,
+    max_reviews: int = 10,
     excerpt_chars: int = 320,
 ) -> str:
     """Return a Portuguese answer, or the refusal when evidence is too thin."""
