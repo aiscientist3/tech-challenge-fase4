@@ -1,6 +1,6 @@
 # Frontend do chat
 
-Interface de conversa para o RAG de Voice of Customer da Olist. O usuário faz uma pergunta em linguagem natural, pode filtrar por metadados e recebe a resposta com as avaliações usadas como evidência. As respostas vêm da rota `POST /chat`, que o backend ainda vai implementar. Enquanto ela não existe, o modo mock responde no lugar dela.
+Interface de conversa para o RAG de Voice of Customer da Olist. O usuário faz uma pergunta em linguagem natural, pode filtrar por metadados e recebe a resposta com as avaliações usadas como evidência. As respostas vêm da rota `POST /chat`, servida por `scripts/serve_chat.py` (veja o [README da raiz](../README.md#instalação-e-execução)). Sem o backend no ar, o modo mock responde no lugar dela.
 
 ## Stack
 
