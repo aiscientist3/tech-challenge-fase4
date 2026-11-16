@@ -17,6 +17,7 @@ class Evidence:
     review_id: str
     text: str
     review_score: int
+    customer_state: str = ""
 
 
 def usable_reviews(payload: dict[str, object], *, min_reviews: int) -> tuple[str, list[Evidence]] | None:
@@ -64,6 +65,28 @@ def _reviews(raw: object) -> list[Evidence]:
     return reviews
 
 
+def customer_text(text: str) -> str:
+    """Keep the title and the comment. Drop the English index scaffold.
+
+    The stored document starts with score, order, date, and seller. A small
+    model treats that header as the review and misses the complaint.
+    """
+    folded = text.lower()
+    title_at = folded.rfind("review title:")
+    comment_at = folded.rfind("review comment:")
+    title = ""
+    comment = ""
+    if title_at >= 0:
+        end = comment_at if comment_at > title_at else len(text)
+        title = text[title_at + len("review title:") : end].strip()
+    if comment_at >= 0:
+        comment = text[comment_at + len("review comment:") :].strip()
+    parts = [part for part in (title, comment) if part]
+    if parts:
+        return "\n".join(parts)
+    return text.strip()
+
+
 def _one(item: object) -> Evidence | None:
     if not isinstance(item, dict):
         return None
@@ -76,7 +99,13 @@ def _one(item: object) -> Evidence | None:
         return None
     if score is None:
         return None
-    return Evidence(review_id=review_id.strip(), text=text.strip(), review_score=score)
+    state = item.get("customer_state")
+    return Evidence(
+        review_id=review_id.strip(),
+        text=customer_text(text),
+        review_score=score,
+        customer_state=state.strip().upper() if isinstance(state, str) else "",
+    )
 
 
 def _score(value: object) -> int | None:

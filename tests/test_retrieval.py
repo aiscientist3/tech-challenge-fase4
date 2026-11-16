@@ -7,6 +7,7 @@ import pytest
 from rag.ingestion.chunking import chunk_documents
 from rag.ingestion.indexer import CollectionConfigError, document_id, index_documents
 from rag.retrieval.filters import RetrievalFilters, to_chroma_where
+from rag.retrieval.hybrid import hybrid_score
 from rag.retrieval.interpret import interpret_question, merge_filters
 from rag.retrieval.payload import to_payload
 from rag.retrieval.retrieve import prepare_question, retrieve
@@ -66,6 +67,99 @@ def test_selection_drops_far_duplicate_and_extra_chunks() -> None:
         "extra": "beyond_k",
         "far": "distance",
     }
+
+
+def test_hybrid_score_trusts_the_vector_and_still_lifts_a_real_answer() -> None:
+    assert hybrid_score(0.20, 0.5) > hybrid_score(0.50, 0.5)
+    assert hybrid_score(0.55, 0.95) > hybrid_score(0.40, 0.05)
+
+
+def test_a_comment_that_answers_ranks_above_a_nearer_one() -> None:
+    policy = SelectionPolicy(candidate_k=5, k=2, max_distance=0.65, min_keep=1)
+    praise = _document(
+        "praise",
+        distance=0.40,
+        order_id="order-1",
+        entity_id="rev-1",
+        text="Gostei muito do produto, ficou ótimo.",
+    )
+    delay = _document(
+        "delay",
+        distance=0.55,
+        order_id="order-2",
+        entity_id="rev-2",
+        text="A entrega atrasou e o pedido demorou.",
+    )
+    selected, _dropped = select_documents(
+        [praise, delay],
+        policy,
+        question="O que os clientes relatam sobre atraso na entrega?",
+        score_passages=_answer_score,
+    )
+    assert [document.id for document in selected] == ["delay", "praise"]
+    assert selected[0].relevance == pytest.approx(0.95)
+
+
+def test_a_low_score_stays_when_the_list_still_has_room() -> None:
+    policy = SelectionPolicy(candidate_k=5, k=2, max_distance=0.65, min_keep=1)
+    praise = _document(
+        "praise",
+        distance=0.40,
+        order_id="order-1",
+        entity_id="rev-1",
+        text="A entrega chegou antes do prazo e o produto é ótimo.",
+    )
+    delay = _document(
+        "delay",
+        distance=0.55,
+        order_id="order-2",
+        entity_id="rev-2",
+        text="A entrega atrasou e o pedido não chegou no prazo.",
+    )
+    selected, dropped = select_documents(
+        [praise, delay],
+        policy,
+        question="O que os clientes relatam sobre atraso na entrega?",
+        score_passages=_answer_score,
+    )
+    assert [document.id for document in selected] == ["delay", "praise"]
+    assert dropped == []
+
+
+def test_a_comment_that_answers_beats_a_nearer_miss() -> None:
+    policy = SelectionPolicy(candidate_k=5, k=3, max_distance=0.65, min_keep=1)
+    contact = _document(
+        "contact",
+        distance=0.30,
+        order_id="order-1",
+        entity_id="rev-1",
+        text="Entrei em contato e recebi o produto certo.",
+    )
+    on_time = _document(
+        "on-time",
+        distance=0.40,
+        order_id="order-2",
+        entity_id="rev-2",
+        text="Gostei muito do produto, a entrega dentro do prazo.",
+    )
+    missing = _document(
+        "missing",
+        distance=0.62,
+        order_id="order-3",
+        entity_id="rev-3",
+        text="O produto não foi entregue. Não fiquei satisfeito com a entrega.",
+    )
+    selected, _dropped = select_documents(
+        [contact, on_time, missing],
+        policy,
+        question="O que os clientes relatam sobre atraso na entrega?",
+        score_passages=_answer_score,
+    )
+    assert [document.id for document in selected] == ["missing", "on-time", "contact"]
+
+
+def test_default_search_reads_forty_candidates() -> None:
+    assert SelectionPolicy().candidate_k == 40
 
 
 def test_summaries_without_an_order_id_stay_distinct() -> None:
@@ -156,6 +250,48 @@ def test_prepare_question_rejects_a_blank_question() -> None:
         prepare_question(" \n\t ")
 
 
+def test_high_and_low_scores_are_not_one_band() -> None:
+    from rag.retrieval.interpret import contrasts_high_and_low
+
+    question = "por que algumas entregas tem nota alta e outras nota baixa?"
+    filters = interpret_question(question)
+    assert filters.review_score_min is None
+    assert filters.review_score_max is None
+    assert contrasts_high_and_low(question) is True
+    assert contrasts_high_and_low("quais são os motivos de nota baixa?") is False
+
+
+def test_comparison_questions_keep_a_wider_neighborhood() -> None:
+    assert SelectionPolicy().max_distance == 0.75
+
+
+def test_a_region_becomes_the_states_in_that_region() -> None:
+    filters = interpret_question("no nordeste as entregas atrasam?")
+    assert filters.customer_state is None
+    assert filters.review_score_min is None
+    assert filters.customer_states == ("AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE")
+    assert to_chroma_where(filters) == {
+        "customer_state": {"$in": ["AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"]}
+    }
+
+
+def test_a_comparison_searches_every_named_region() -> None:
+    filters = interpret_question(
+        "as regioes norte e nordeste tem mais problemas na entrega que regioes sul e sudeste?"
+    )
+    assert filters.review_score_min == 1
+    assert filters.review_score_max == 3
+    assert filters.customer_states is not None
+    for uf in ("PA", "BA", "SP", "RS"):
+        assert uf in filters.customer_states
+
+
+def test_a_named_state_wins_over_a_region_word() -> None:
+    filters = interpret_question("em são paulo as entregas atrasam?")
+    assert filters.customer_state == "SP"
+    assert filters.customer_states is None
+
+
 def test_negative_reviews_in_sao_paulo_become_score_and_state_filters() -> None:
     filters = interpret_question("Em São Paulo quais são os motivos de nota baixa?")
     assert filters.customer_state == "SP"
@@ -168,6 +304,18 @@ def test_negative_evaluations_set_the_low_score_range() -> None:
     assert filters.review_score_min == 1
     assert filters.review_score_max == 3
     assert filters.customer_state is None
+
+
+def test_asking_for_problems_keeps_the_low_scores() -> None:
+    filters = interpret_question("Quais são os principais problemas relatados pelos clientes?")
+    assert filters.review_score_min == 1
+    assert filters.review_score_max == 3
+
+
+def test_sem_problemas_does_not_force_a_low_score() -> None:
+    filters = interpret_question("Quais elogios de quem comprou sem problemas?")
+    assert filters.review_score_min == 4
+    assert filters.review_score_max == 5
 
 
 def test_delivery_delay_does_not_invent_a_score_filter() -> None:
@@ -242,10 +390,12 @@ def _document(
     order_id: str,
     entity_id: str,
     doc_type: str = "review",
+    text: str | None = None,
+    relevance: float = 0.0,
 ) -> RetrievedDocument:
     return RetrievedDocument(
         id=chunk_id,
-        text=chunk_id,
+        text=chunk_id if text is None else text,
         distance=distance,
         doc_type=doc_type,
         entity_id=entity_id,
@@ -255,4 +405,19 @@ def _document(
         customer_state="SP",
         purchase_year=2018,
         purchase_month=1,
+        relevance=relevance,
     )
+
+
+def _answer_score(_question: str, texts: list[str]) -> list[float]:
+    """Stand-in for the cross-encoder. A delay comment answers; a side remark does not."""
+    scores: list[float] = []
+    for text in texts:
+        folded = text.casefold()
+        if "não foi entregue" in folded or "atrasou" in folded or "demorou" in folded:
+            scores.append(0.95)
+        elif "dentro do prazo" in folded:
+            scores.append(0.35)
+        else:
+            scores.append(0.05)
+    return scores

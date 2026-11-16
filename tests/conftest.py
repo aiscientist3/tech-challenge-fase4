@@ -48,6 +48,16 @@ def documents(transformed: TransformedData):
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_relevance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests must not download the cross-encoder."""
+
+    def zeros(_question: str, texts: list[str]) -> list[float]:
+        return [0.0] * len(texts)
+
+    monkeypatch.setattr("rag.retrieval.relevance.score_passages", zeros)
+
+
 def copy_fixtures(destination: Path) -> Path:
     if destination.exists():
         shutil.rmtree(destination)

@@ -1,17 +1,20 @@
 """Choose which retrieved chunks are evidence.
 
-Similarity search returns a ranked neighborhood. Selection then removes a
-chunk when its cosine distance is above the cutoff, when a closer chunk of
-the same order was already kept, or when the result list is already full.
-Nothing in this module reads the question or calls a language model.
+Similarity search returns a ranked neighborhood. When the question is known,
+a cross-encoder reads the question with each comment and the chunks are
+reordered by vector similarity plus that score. Selection then removes a
+chunk that is too far, duplicated, or past the result limit.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from rag.retrieval.filters import RetrievalFilters
+from rag.retrieval.group import RegionTally
+from rag.retrieval.hybrid import hybrid_score
 
 DropReason = Literal["distance", "duplicate_chunk", "duplicate_order", "beyond_k"]
 
@@ -21,13 +24,13 @@ class SelectionPolicy:
     """Limits applied after the vector search.
 
     `max_distance` is a Chroma cosine distance: lower means closer. The
-    default 0.65 sits above the relevant hits measured in the sample
-    collection (about 0.39 to 0.53) and below a loose neighborhood.
+    default 0.75 keeps a direct question, whose hits sit around 0.56 to
+    0.63, and a comparison, whose nearest reviews sit just above 0.65.
     """
 
-    candidate_k: int = 20
+    candidate_k: int = 40
     k: int = 10
-    max_distance: float = 0.65
+    max_distance: float = 0.75
     min_keep: int = 2
 
     def __post_init__(self) -> None:
@@ -56,6 +59,7 @@ class RetrievedDocument:
     customer_state: str
     purchase_year: int
     purchase_month: int
+    relevance: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,19 +85,27 @@ class RetrievalResult:
     dropped: list[DroppedDocument]
     insufficient_evidence: bool
     candidate_count: int
+    score_groups: tuple[RegionTally, ...] = ()
+    score_focus: str = ""
+    compare_left: tuple[str, ...] = ()
+    compare_right: tuple[str, ...] = ()
 
 
 def select_documents(
     candidates: list[RetrievedDocument],
     policy: SelectionPolicy,
+    *,
+    question: str | None = None,
+    score_passages: Callable[[str, list[str]], list[float]] | None = None,
 ) -> tuple[list[RetrievedDocument], list[DroppedDocument]]:
-    """Keep the closest eligible chunks and record why the others were dropped.
+    """Keep the best eligible chunks and record why the others were dropped.
 
-    Candidates are ordered by distance, then by id, so the same input always
-    yields the same selection. An empty `order_id` (category and state
-    summaries) is not treated as one shared order.
+    With a question, the order is the hybrid score: vector similarity plus
+    how well the comment answers the question. Without a question, the order
+    stays the vector distance. An empty `order_id` is not one shared order.
     """
-    ordered = sorted(candidates, key=lambda document: (document.distance, document.id))
+    scored = _with_relevance(candidates, question, score_passages)
+    ordered = sorted(scored, key=_rank_key(question))
     selected: list[RetrievedDocument] = []
     dropped: list[DroppedDocument] = []
     seen_entities: set[tuple[str, str]] = set()
@@ -108,6 +120,38 @@ def select_documents(
         if document.order_id:
             seen_orders.add(document.order_id)
     return selected, dropped
+
+
+def _with_relevance(
+    candidates: list[RetrievedDocument],
+    question: str | None,
+    score_passages: Callable[[str, list[str]], list[float]] | None,
+) -> list[RetrievedDocument]:
+    if not question or not question.strip() or not candidates:
+        return candidates
+    scorer = score_passages if score_passages is not None else _default_scorer()
+    scores = scorer(question, [document.text for document in candidates])
+    if len(scores) != len(candidates):
+        raise ValueError("The relevance model returned one score per comment.")
+    return [
+        replace(document, relevance=float(score))
+        for document, score in zip(candidates, scores, strict=True)
+    ]
+
+
+def _default_scorer() -> Callable[[str, list[str]], list[float]]:
+    from rag.retrieval.relevance import score_passages
+
+    return score_passages
+
+
+def _rank_key(question: str | None):
+    def key(document: RetrievedDocument) -> tuple[float, float, str]:
+        if not question or not question.strip():
+            return (document.distance, document.distance, document.id)
+        return (-hybrid_score(document.distance, document.relevance), document.distance, document.id)
+
+    return key
 
 
 def _drop_reason(

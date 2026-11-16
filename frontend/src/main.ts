@@ -5,8 +5,8 @@ import type { ChatFilters, ChatTurn, DocType } from "./api.ts";
 import { CATEGORIES } from "./categories.ts";
 import { assistantMessage, errorMessage, loadingMessage, userMessage } from "./render.ts";
 
-// Only the most recent turns go to the backend to keep the prompt small.
-const HISTORY_LIMIT = 10;
+// The last two exchanges. The server uses them only to follow the conversation.
+const HISTORY_LIMIT = 4;
 const MAX_INPUT_HEIGHT = 160;
 
 const messages = byId<HTMLDivElement>("messages");

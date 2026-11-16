@@ -4,7 +4,7 @@ PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 export PYTHONPATH := src
 
-.PHONY: install profile ingest-sample ingest-full inspect retrieve test
+.PHONY: install profile ingest-sample ingest-full inspect retrieve evaluate test
 
 install:
 	$(PYTHON) -m venv $(VENV)
@@ -25,6 +25,9 @@ inspect:
 
 retrieve:
 	$(PY) scripts/retrieve.py $(QUESTION)
+
+evaluate:
+	$(PY) scripts/evaluate.py
 
 test:
 	$(PY) -m pytest

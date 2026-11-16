@@ -9,7 +9,7 @@ embed it with a different function.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import chromadb
 from langchain_core.embeddings import Embeddings
@@ -21,8 +21,10 @@ from rag.ingestion.indexer import (
     collection_names,
 )
 from rag.retrieval.filters import RetrievalFilters, to_chroma_where
-from rag.retrieval.interpret import interpret_question, merge_filters
+from rag.retrieval.group import RegionTally, example_indexes, group_regions, tally_text
+from rag.retrieval.interpret import contrasts_high_and_low, interpret_question, merge_filters, region_question
 from rag.retrieval.select import (
+    DroppedDocument,
     RetrievalResult,
     RetrievedDocument,
     SelectionPolicy,
@@ -30,6 +32,10 @@ from rag.retrieval.select import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A regional comparison needs more than the usual 40 neighbors, so several
+# regions show up in the same vector search before they are grouped by score.
+_REGION_CANDIDATES = 80
 
 
 class CollectionNotFoundError(Exception):
@@ -77,21 +83,91 @@ def retrieve(
     active_filters = merge_filters(filters, interpret_question(prepared.normalized_question))
     active_policy = policy if policy is not None else SelectionPolicy()
     collection = open_collection(settings)
-    candidates = search_collection(
-        collection,
-        embeddings,
-        prepared.normalized_question,
-        filters=active_filters,
-        candidate_k=active_policy.candidate_k,
+    caller_set_score = filters is not None and (
+        filters.review_score_min is not None or filters.review_score_max is not None
     )
-    selected, dropped = select_documents(candidates, active_policy)
-    insufficient = len(selected) < active_policy.min_keep
+    compared_question = region_question(prepared.normalized_question)
+    focus = compared_question[0] if compared_question is not None else None
+    compare_left = compared_question[1] if compared_question is not None else ()
+    compare_right = compared_question[2] if compared_question is not None else ()
+    score_groups: tuple[RegionTally, ...] = ()
+    if contrasts_high_and_low(prepared.normalized_question) and not caller_set_score:
+        selected, dropped, candidate_count = _both_score_bands(
+            collection,
+            embeddings,
+            prepared.normalized_question,
+            active_filters,
+            active_policy,
+        )
+    else:
+        search_filters = active_filters
+        search_policy = active_policy
+        if focus in {"low", "high"} and not caller_set_score:
+            search_filters = replace(active_filters, review_score_min=None, review_score_max=None)
+            wider = max(active_policy.candidate_k, _REGION_CANDIDATES)
+            search_policy = replace(active_policy, candidate_k=wider)
+        elif focus == "count":
+            wider = max(active_policy.candidate_k, _REGION_CANDIDATES)
+            search_policy = replace(active_policy, candidate_k=wider)
+        candidates = search_collection(
+            collection,
+            embeddings,
+            prepared.normalized_question,
+            filters=search_filters,
+            candidate_k=search_policy.candidate_k,
+        )
+        if focus in {"low", "high"}:
+            score_groups = group_regions([(item.customer_state, item.review_score) for item in candidates])
+            pool = _in_score_band(candidates, active_filters)
+        elif focus == "count":
+            score_groups = group_regions([(item.customer_state, item.review_score) for item in candidates])
+            pool = candidates
+        else:
+            pool = candidates
+        if focus is not None and tally_text(score_groups, focus, compare_left, compare_right):
+            near = [item for item in pool if item.distance <= active_policy.max_distance]
+            indexes = example_indexes(
+                [item.customer_state for item in near],
+                score_groups,
+                focus,
+                compare_left,
+                compare_right,
+                [item.order_id for item in near],
+            )
+            if indexes:
+                selected = [near[index] for index in indexes]
+                if focus == "count" and compare_left and compare_right:
+                    score_groups = group_regions(
+                        [(item.customer_state, item.review_score) for item in selected]
+                    )
+                dropped = []
+                candidates = near
+            else:
+                selected, dropped = select_documents(
+                    pool,
+                    active_policy,
+                    question=prepared.normalized_question,
+                )
+                candidates = pool
+        else:
+            selected, dropped = select_documents(
+                pool,
+                active_policy,
+                question=prepared.normalized_question,
+            )
+            candidates = pool
+        candidate_count = len(candidates)
+    compared = focus is not None and bool(
+        tally_text(score_groups, focus, compare_left, compare_right)
+    )
+    insufficient = len(selected) < active_policy.min_keep and not compared
     logger.info(
-        "Retrieved %s candidates, selected %s, insufficient=%s, filters=%s.",
-        len(candidates),
+        "Retrieved %s candidates, selected %s, insufficient=%s, filters=%s, relevance=%.2f.",
+        candidate_count,
         len(selected),
         insufficient,
         active_filters.describe(),
+        selected[0].relevance if selected else 0.0,
     )
     return RetrievalResult(
         original_question=prepared.original_question,
@@ -100,8 +176,69 @@ def retrieve(
         selected=selected,
         dropped=dropped,
         insufficient_evidence=insufficient,
-        candidate_count=len(candidates),
+        candidate_count=candidate_count,
+        score_groups=score_groups,
+        score_focus=focus or "",
+        compare_left=compare_left,
+        compare_right=compare_right,
     )
+
+
+def _in_score_band(
+    candidates: list[RetrievedDocument],
+    filters: RetrievalFilters,
+) -> list[RetrievedDocument]:
+    """Keep the score band the question asked for, after the wider search was grouped."""
+    low = filters.review_score_min
+    high = filters.review_score_max
+    if low is None and high is None:
+        return candidates
+    kept: list[RetrievedDocument] = []
+    for document in candidates:
+        if low is not None and document.review_score < low:
+            continue
+        if high is not None and document.review_score > high:
+            continue
+        kept.append(document)
+    return kept
+
+
+def _both_score_bands(
+    collection: chromadb.Collection,
+    embeddings: Embeddings,
+    question: str,
+    filters: RetrievalFilters,
+    policy: SelectionPolicy,
+) -> tuple[list[RetrievedDocument], list[DroppedDocument], int]:
+    """Read low scores and high scores separately, then keep both sides.
+
+    A question that asks why some notes are high and others are low has no
+    single score filter. Each band is searched on its own so one side cannot
+    fill the whole list.
+    """
+    half = SelectionPolicy(
+        candidate_k=policy.candidate_k,
+        k=max(1, policy.k // 2),
+        max_distance=policy.max_distance,
+        min_keep=1,
+    )
+    selected: list[RetrievedDocument] = []
+    dropped: list[DroppedDocument] = []
+    seen = 0
+    for low, high in ((1, 3), (4, 5)):
+        band = replace(filters, review_score_min=low, review_score_max=high)
+        candidates = search_collection(
+            collection,
+            embeddings,
+            question,
+            filters=band,
+            candidate_k=half.candidate_k,
+        )
+        kept, rejected = select_documents(candidates, half, question=question)
+        selected.extend(kept)
+        dropped.extend(rejected)
+        seen += len(candidates)
+    return selected, dropped, seen
 
 
 def open_collection(settings: Settings) -> chromadb.Collection:
