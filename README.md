@@ -1,291 +1,516 @@
-# Voice of Customer com RAG — Olist
+# Voice of Customer Intelligence com RAG — Olist
 
-Projeto de RAG sobre as avaliações do e-commerce brasileiro da Olist (Tech Challenge, Fase 4). O repositório tem duas partes:
+Tech Challenge da Fase 4 (Pós-Tech IA para Devs). Esta solução de RAG responde em linguagem natural a perguntas sobre as avaliações de clientes da base [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce/data). Cada resposta vem com as avaliações que a sustentam. Quando a base não traz evidência suficiente, o sistema recusa.
 
-- **Ingestão** (`src/`, `scripts/`): lê os CSV, monta documentos em linguagem natural e grava uma coleção persistente no Chroma.
-- **Frontend** (`frontend/`): interface de chat em que o usuário faz perguntas, filtra por metadados e vê as avaliações usadas como evidência.
+> **Vídeo de apresentação:** _link a adicionar_
 
-Ainda falta a rota `POST /chat`, que vai recuperar da coleção e gerar a resposta com um LLM. Até ela existir, o front funciona em modo mock.
+## Sumário
 
-## Visão geral
+- [Problema de negócio](#problema-de-negócio)
+- [Onde cada requisito do desafio é atendido](#onde-cada-requisito-do-desafio-é-atendido)
+- [Arquitetura](#arquitetura)
+- [Tecnologias e bibliotecas](#tecnologias-e-bibliotecas)
+- [Preparação da base](#preparação-da-base)
+- [Pipeline RAG](#pipeline-rag)
+- [Respostas fundamentadas em evidências](#respostas-fundamentadas-em-evidências)
+- [Perguntas sem evidência suficiente](#perguntas-sem-evidência-suficiente)
+- [Metadados e exploração contextual (desafio adicional)](#metadados-e-exploração-contextual-desafio-adicional)
+- [Principais decisões técnicas](#principais-decisões-técnicas)
+- [Instalação e execução](#instalação-e-execução)
+- [Exemplos de perguntas e respostas](#exemplos-de-perguntas-e-respostas)
+- [Avaliação da recuperação](#avaliação-da-recuperação)
+- [Reprodutibilidade](#reprodutibilidade)
+- [Limitações e próximos passos](#limitações-e-próximos-passos)
+- [Estrutura do repositório](#estrutura-do-repositório)
 
-O fluxo cabe em quatro passos:
+## Problema de negócio
 
-1. Validar os nove CSV e carregá-los com tipos explícitos.
-2. Juntar pedidos, clientes, itens, produtos, tradução de categoria, vendedores, pagamentos e avaliações.
-3. Renderizar um texto por pedido (e, por padrão, por avaliação com comentário e por resumo de categoria e de UF) e salvar `data/processed/documents.parquet`.
-4. Quebrar só os textos longos, gerar embeddings e fazer upsert na coleção `olist_ecommerce` em `data/chroma/`.
+Um e-commerce acumula milhares de avaliações. A nota mostra o nível de satisfação, mas o motivo está no texto do comentário, e ler isso à mão não escala. Gestores e analistas precisam responder perguntas como:
 
-O desenho das decisões está em [`docs/ingestion.md`](docs/ingestion.md). Os números do extrato estão em [`docs/data_profile.md`](docs/data_profile.md).
+- Quais são os principais problemas relatados pelos clientes?
+- Quais reclamações sobre entrega aparecem com mais frequência?
+- O que os clientes mais elogiam?
+- Que padrões aparecem nas avaliações de clientes insatisfeitos?
+- Quais avaliações sustentam essa conclusão?
 
-## Conjunto de dados
+A solução transforma os comentários em uma base vetorial consultável. Para cada pergunta, ela recupera as avaliações mais relevantes e usa só esse conteúdo como contexto para um modelo de linguagem escrever a resposta.
 
-Fonte: [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce/data).
+## Onde cada requisito do desafio é atendido
 
-Baixe o pacote e coloque os CSV em `data/raw/`. O passo a passo também está em [`data/raw/README.md`](data/raw/README.md). A execução para com a lista do que falta e com o link acima se algum arquivo ou coluna obrigatória não estiver lá.
+| Requisito do enunciado | Onde está |
+| --- | --- |
+| Construção da base de conhecimento (seleção, limpeza, ausentes, organização, embeddings, indexação) | [Preparação da base](#preparação-da-base), [`docs/ingestion.md`](docs/ingestion.md), [`docs/data_profile.md`](docs/data_profile.md) |
+| Pipeline RAG (transformação da pergunta, recuperação semântica, seleção, contexto, geração) | [Pipeline RAG](#pipeline-rag) |
+| Respostas fundamentadas em evidências | [Respostas fundamentadas em evidências](#respostas-fundamentadas-em-evidências) |
+| Tratamento de perguntas sem evidência suficiente | [Perguntas sem evidência suficiente](#perguntas-sem-evidência-suficiente) |
+| Desafio adicional: metadados | [Metadados e exploração contextual](#metadados-e-exploração-contextual-desafio-adicional) |
+| Código-fonte | `src/rag/`, `scripts/`, `frontend/` |
+| Instruções de instalação e execução | [Instalação e execução](#instalação-e-execução) |
+| Arquitetura | [Arquitetura](#arquitetura) |
+| Tecnologias e bibliotecas | [Tecnologias e bibliotecas](#tecnologias-e-bibliotecas) |
+| Justificativa das decisões técnicas | [Principais decisões técnicas](#principais-decisões-técnicas) |
+| Exemplos de perguntas e respostas | [Exemplos de perguntas e respostas](#exemplos-de-perguntas-e-respostas) |
+| Informações para reproduzir | [Reprodutibilidade](#reprodutibilidade) |
 
-Arquivos esperados:
+## Arquitetura
 
-- `olist_orders_dataset.csv`
-- `olist_order_items_dataset.csv`
-- `olist_order_payments_dataset.csv`
-- `olist_order_reviews_dataset.csv`
-- `olist_customers_dataset.csv`
-- `olist_sellers_dataset.csv`
-- `olist_products_dataset.csv`
-- `olist_geolocation_dataset.csv`
-- `product_category_name_translation.csv`
+Tudo roda localmente, sem chave de API. A solução tem duas fases: a ingestão, que roda uma vez, e a consulta, que roda a cada pergunta.
 
-No extrato perfilado em 25/10/2026 há 99.441 pedidos, de 2016-09-04 a 2018-10-17, 112.650 itens, 103.886 pagamentos, 99.224 avaliações, 99.441 clientes, 3.095 vendedores, 32.951 produtos, 71 traduções de categoria e 1.000.163 linhas de geolocalização.
+```mermaid
+flowchart TD
+    subgraph Ingestão["Ingestão (scripts/ingest.py)"]
+        A[9 CSV da Olist em data/raw] --> B[extract.py<br/>validação e tipos explícitos]
+        B --> C[transform.py<br/>junções, campos derivados, nulos]
+        C --> D[documents.py<br/>texto em linguagem natural + metadados]
+        D --> E[chunking.py<br/>split só acima de 1000 caracteres]
+        E --> F[indexer.py<br/>embeddings MiniLM multilingual]
+        F --> G[(Chroma persistente<br/>data/chroma, cosseno)]
+    end
+
+    subgraph Consulta["Consulta (scripts/serve_chat.py — POST /chat)"]
+        U[Pergunta + filtros + histórico<br/>frontend Vite] --> P[prepare_question<br/>normaliza espaços]
+        P --> I[interpret.py<br/>nota, UF e região lidas da pergunta]
+        I --> Q[embedding da pergunta<br/>mesmo modelo da ingestão]
+        Q --> G
+        G --> R[40 candidatos mais próximos<br/>com filtro de metadados]
+        R --> X[cross-encoder mMiniLM<br/>score híbrido 0,7 vetor + 0,3 relevância]
+        X --> S[select.py<br/>distância ≤ 0,75, sem duplicata, top 10]
+        S -->|menos de 2 avaliações| N[Recusa padronizada<br/>LLM não é chamado]
+        S -->|2 ou mais| C2[context.py<br/>nota + comentário, até 12 mil caracteres]
+        C2 --> L[Ollama qwen2.5:3b<br/>temperatura 0,1]
+        L --> V[pós-processamento<br/>remove eco do prompt, checa afirmações regionais]
+        V --> O[answer + sources + insufficient_evidence]
+    end
+```
+
+| Camada | Módulos | Responsabilidade |
+| --- | --- | --- |
+| Ingestão | `src/rag/ingestion/` | Ler e validar os CSV, juntar tabelas, montar documentos, fazer o chunking, gerar embeddings e gravar no Chroma |
+| Recuperação | `src/rag/retrieval/` | Interpretar a pergunta, montar filtros, fazer a busca vetorial, o rerank com cross-encoder e a seleção das evidências |
+| Geração | `src/rag/generation/` | Montar o prompt e o contexto, chamar o Ollama, limpar a resposta, checar a fundamentação e montar o JSON de `/chat` |
+| API | `scripts/serve_chat.py` | Servidor HTTP com `POST /chat` (porta 8000) |
+| Interface | `frontend/` | Chat em Vite + TypeScript, com filtros e cards de evidência ([`frontend/README.md`](frontend/README.md)) |
 
 ## Tecnologias e bibliotecas
 
-Python 3.12.3 (o código pede 3.11+). As versões abaixo são as que `requirements.txt` fixa. O arquivo também trava as dependências transitivas, inclusive `torch==2.14.1`.
+Python 3.12.3 (o código pede 3.11+). As versões são as fixadas em `requirements.txt`, que também trava as dependências transitivas.
 
-| Biblioteca | Versão | Função |
+| Tecnologia | Versão | Uso |
 | --- | --- | --- |
-| pandas | 3.1.0 | Leitura dos CSV, junções e agregações |
-| pyarrow | 26.0.0 | Gravação de `documents.parquet` |
-| langchain-core | 1.7.0 | Tipo `Document` |
-| langchain-text-splitters | 1.1.3 | `RecursiveCharacterTextSplitter` |
-| langchain-huggingface | 1.2.3 | Embeddings locais via Hugging Face |
-| sentence-transformers | 5.7.0 | Modelo multilingual. A linha 5.x é a que o `langchain-huggingface` 1.2.3 aceita |
-| langchain-chroma | 1.1.0 | Abre a coleção na verificação |
-| chromadb | 1.5.9 | Índice vetorial persistente |
-| pydantic-settings | 2.16.1 | Configuração e `.env` |
-| python-dotenv | 1.2.4 | Leitura do `.env` |
-| tqdm | 4.70.1 | Barra de progresso dos lotes |
+| pandas / pyarrow | 3.1.0 / 26.0.0 | Leitura dos CSV, junções, agregações e o `documents.parquet` |
+| langchain-core / langchain-text-splitters | 1.7.0 / 1.1.3 | Tipo `Document` e `RecursiveCharacterTextSplitter` |
+| langchain-huggingface / sentence-transformers | 1.2.3 / 5.7.0 | Embeddings locais e o cross-encoder de rerank |
+| torch | 2.14.1 | Inferência dos dois modelos, fixada na CPU |
+| chromadb / langchain-chroma | 1.5.9 / 1.1.0 | Banco vetorial persistente (HNSW, cosseno) |
+| pydantic-settings / python-dotenv | 2.16.1 / 1.2.4 | Configuração via `.env` |
+| tqdm | 4.70.1 | Progresso da ingestão |
 | pytest | 9.1.1 | Testes com CSV mínimos em `tests/fixtures/` |
+| Ollama | — | Servidor local do LLM (`http://127.0.0.1:11434`) |
 
-O modelo padrão é `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`. Para um modelo de API, defina `EMBEDDING_PROVIDER=openai` e instale `langchain-openai` à parte. A instalação padrão permanece local.
+Modelos:
 
-### Frontend
-
-Node 20+ (testado com 24.13.1). As versões vêm de `frontend/package.json`.
-
-| Biblioteca | Versão | Função |
+| Papel | Modelo | Por quê |
 | --- | --- | --- |
-| Vite | 8.3 | Servidor de desenvolvimento, build e proxy de `/chat` |
-| TypeScript | 7.0 | Código do front, sem framework |
-| Tailwind CSS | 4.3 | Estilos utilitários, pelo plugin `@tailwindcss/vite` |
-| daisyUI | 5.7 | Componentes e o tema `voc` |
-| @tailwindcss/typography | 0.5 | Formatação do texto da resposta |
-| @fontsource-variable/montserrat | 5.3 | Fonte servida localmente |
+| Embedding | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Multilingual (os comentários estão em pt-BR), leve, roda na CPU |
+| Rerank | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` | Cross-encoder multilingual treinado em mMARCO. Lê a pergunta e o comentário juntos |
+| Geração | `qwen2.5:3b` via Ollama | Bom em português para o tamanho e roda localmente sem GPU dedicada |
 
-## Preparação dos dados
+Frontend (Node 20+): Vite 8.3, TypeScript 7.0, Tailwind CSS 4.3, daisyUI 5.7.
 
-O perfil medido orienta a transformação. O resumo abaixo usa esses números; o detalhe coluna a coluna está em [`docs/data_profile.md`](docs/data_profile.md).
+## Preparação da base
 
-Junções, sempre à esquerda, para não perder um pedido quando faltar um cadastro:
+O perfil completo dos dados, coluna a coluna, está em [`docs/data_profile.md`](docs/data_profile.md), e o desenho da ingestão em [`docs/ingestion.md`](docs/ingestion.md). O extrato tem 99.441 pedidos (2016-09-04 a 2018-10-17) e 99.224 avaliações.
 
-- pedidos com clientes por `customer_id` (99.441 dos dois lados; a pessoa se repete em `customer_unique_id`, 96.096);
-- itens com produtos, tradução de categoria e vendedores.
+### Seleção dos dados
 
-Campos derivados:
+- Os nove CSV são validados: a execução para e lista o que falta se um arquivo ou coluna obrigatória estiver ausente.
+- Entram pedidos, clientes, itens, produtos, tradução de categoria, vendedores, pagamentos e avaliações.
+- A geolocalização (1.000.163 linhas) é validada, mas não é carregada. Cidade e UF já vêm de clientes e vendedores, e a coordenada não ajuda a responder perguntas sobre comentários.
 
-- atraso em dias de calendário entre a entrega ao cliente e a data estimada (positivo = atraso);
-- valor total = soma de `payment_value`, ou preço + frete se o pedido não tiver pagamento;
-- quantidade de itens = número de linhas de item.
+### Limpeza e preparação dos textos
 
-Nulos saem da frase em vez de aparecerem como `nan`:
+- Todas as junções são à esquerda, para um cadastro faltante não derrubar o pedido.
+- Campos derivados: atraso em dias entre a entrega e a data estimada, valor total (soma dos pagamentos, ou preço + frete quando não há pagamento) e quantidade de itens.
+- O comentário fica como o cliente escreveu: sem lematização e sem remover stopwords. Um modelo de embedding de sentenças funciona melhor com o texto natural.
+- A categoria aparece em inglês (arquivo de tradução) e em português. As duas sem tradução (`pc_gamer` e `portateis_cozinha_e_preparadores_de_alimentos`) ficam em português.
 
-- 58,70% das avaliações não têm comentário; 88,34% não têm título;
-- 610 produtos (1,85%) não têm categoria;
-- as categorias `pc_gamer` e `portateis_cozinha_e_preparadores_de_alimentos` não têm tradução: o nome em português permanece;
-- 8 pedidos `delivered` não têm data de entrega ao cliente. O metadado de atraso usa `-9999`;
-- 2 pagamentos registram 0 parcelas. Essa parcela não entra no texto.
+### Tratamento de valores ausentes
 
-Há 9.803 pedidos com mais de um item (máximo 21), 2.961 com mais de um pagamento (máximo 29) e 547 com mais de uma avaliação (máximo 3). Tudo isso cabe em um documento por `order_id`. 775 pedidos não têm itens; o documento existe mesmo assim, sem a frase de itens.
+| Situação | Volume | Tratamento |
+| --- | --- | --- |
+| Avaliação sem comentário | 58,70% | A frase de comentário sai do texto. Não há documento `review` para ela |
+| Avaliação sem título | 88,34% | A frase de título sai do texto |
+| Produto sem categoria | 610 (1,85%) | A frase de categoria sai. O metadado fica `""` |
+| Pedido entregue sem data de entrega | 8 | O atraso vira a sentinela `-9999` |
+| Pagamento com 0 parcelas | 2 | A parcela não entra no texto |
+| Pedido sem nota | — | `review_score = -1` (o Chroma não aceita `None`) |
 
-Geolocalização: 1.000.163 linhas para 19.015 prefixos de CEP (média de 52,60 linhas por prefixo). O arquivo é validado e perfilado. A ingestão não o carrega. Cidade e UF já vêm de clientes e vendedores, e o texto do documento não usa coordenada.
+A regra geral é que nulo nunca vira `nan` no texto: a frase inteira some.
 
-## Modelagem dos documentos
+### Organização dos documentos
 
-A linha tabular crua é um mau documento para embedding. O pedido é a unidade que já reúne item, pagamento, prazo e avaliação.
+Uma linha tabular crua é um documento ruim para embedding. Por isso cada entidade vira um texto em linguagem natural:
 
-Exemplo do texto, no formato que o código gera:
+| `doc_type` | Unidade | Uso |
+| --- | --- | --- |
+| `review` | Uma avaliação com comentário (40.950 no extrato completo) | **Principal fonte de evidência do chat** |
+| `order` | Um pedido com itens, pagamento, prazo e avaliação | Contexto do pedido |
+| `category_summary` | Agregado por categoria | Visão geral (nota média, atraso médio) |
+| `state_summary` | Agregado por UF | Visão geral por estado |
+
+Exemplo de documento `review`:
 
 ```text
-Order {id} placed on {date} by a customer from {city}/{state}. Status: {status}. Items: {qty}x {category_en} ({category_pt}) sold by seller from {seller_city}/{seller_state} for R$ {price} + R$ {freight} freight. Payment: {type} in {installments} installments, total R$ {value}. Estimated delivery: {date}; delivered: {date} ({n} days late/early). Review score: {score}/5. Review title: ... Review comment: ...
+Review score: 1/5 on order e62c3201015050463bc2e3b6599a6bc5, placed on 2018-02-27 by a customer from rio de janeiro/RJ. Items: baby (bebes). Seller from sao paulo/SP. Review comment: Comprei o produto e até o momento não recebi ...
 ```
 
-As frases de título, comentário, data ou categoria somem quando o campo está vazio. O comentário e o nome de categoria em português ficam como estão no CSV. O nome em inglês vem do arquivo de tradução.
+Antes de ir para o cross-encoder e para o prompt, `customer_text()` corta esse cabeçalho e deixa só o título e o comentário. Um modelo pequeno confundia o cabeçalho em inglês com a avaliação.
 
-Por padrão também são gerados:
+### Criação dos embeddings
 
-- `review`: uma avaliação com comentário preenchido (40.950 no extrato completo);
-- `category_summary` e `state_summary`: contagem de pedidos, nota média, atraso médio e preço médio. Na categoria o preço é o do item; na UF, o valor do pedido.
+- O modelo multilingual roda na CPU, com vetores normalizados.
+- Documentos com até 1000 caracteres ficam em um chunk só, que é o caso de praticamente todos (na amostra de 1.000 pedidos, os 1.495 documentos ficaram abaixo do limite). Acima disso, o `RecursiveCharacterTextSplitter` corta com sobreposição de 150, e cada pedaço herda os metadados.
+- A pergunta é embutida com o mesmo modelo. A coleção grava o nome do modelo e recusa consultas feitas com outro.
 
-`--doc-types order,review,category_summary,state_summary` escolhe o que entra naquela execução.
+### Armazenamento e indexação
 
-Metadados (somente `str`, `int`, `float` e `bool`):
+- A coleção `olist_ecommerce` fica no Chroma persistente em `data/chroma/`, com HNSW e distância de cosseno.
+- O id de cada chunk é o SHA-256 de `doc_type|entity_id|chunk_index`. O upsert é idempotente: rodar duas vezes não duplica nada.
+- A coleção guarda modelo, chunking, versão do dataset, data da última compra ingerida e tamanho da amostra. Um modelo ou uma amostra diferentes exigem `--reset`.
+
+Metadados gravados por chunk:
 
 | Campo | Conteúdo |
 | --- | --- |
-| `doc_type` | `order`, `review`, `category_summary` ou `state_summary` |
-| `entity_id` | Id estável da entidade, usado também no id do chunk |
-| `order_id` | Pedido, ou vazio nos resumos |
-| `customer_state` | UF do cliente |
-| `customer_city` | Cidade do cliente |
-| `seller_state` | UF do vendedor do item mais caro |
-| `product_category` | Categoria em inglês, ou o nome em português se não houver tradução |
-| `order_status` | Status do pedido |
-| `purchase_year` | Ano da compra, ou `0` |
-| `purchase_month` | Mês da compra, ou `0` |
-| `review_score` | Inteiro. No pedido, a menor nota. `-1` se não houver |
-| `total_value` | Total pago, ou a média no resumo |
-| `delivery_delay_days` | Dias de atraso, ou `-9999` se a entrega não puder ser comparada |
-| `source_files` | CSV usados, separados por vírgula |
-| `chunk_index` | `0` quando o documento permanece inteiro |
+| `doc_type`, `entity_id`, `order_id`, `chunk_index` | Identificação |
+| `review_score` | Nota de 1 a 5 (no pedido, a menor), `-1` se não houver |
+| `product_category` | Categoria em inglês, ou o nome em português sem tradução |
+| `customer_state`, `customer_city`, `seller_state` | Localização |
+| `purchase_year`, `purchase_month` | Período da compra |
+| `order_status`, `total_value`, `delivery_delay_days` | Pedido e entrega (`-9999` quando a entrega não pode ser comparada) |
+| `source_files` | CSV de origem |
 
-Strings ausentes ficam `""`. Um filtro posterior pode usar `{"customer_state": "SP", "review_score": {"$lte": 2}}`. A menor nota do pedido existe para esse filtro continuar achando um pedido que tenha ao menos uma avaliação ruim.
+## Pipeline RAG
 
-## Chunking e embeddings
+O fluxo segue o do enunciado. Cada etapa está ligada ao código que a implementa.
 
-Os comentários estão em português do Brasil, então o modelo precisa ser multilingual. O padrão roda na máquina, sem chave de API, com vetores normalizados e índice HNSW em cosseno. A inferência está fixada na CPU para o resultado não depender de GPU.
+### 1. Transformação da pergunta
 
-A maior parte dos pedidos é curta: 87,59% das linhas de item são o primeiro item do pedido. Cada documento com até 1000 caracteres permanece em um único chunk. O `RecursiveCharacterTextSplitter` (sobreposicão 150) só atua acima disso, e cada pedaço herda os metadados. Na amostra de 1.000 pedidos, os 1.495 documentos ficaram todos abaixo desse limite.
+`prepare_question()` ([`retrieval/retrieve.py`](src/rag/retrieval/retrieve.py)) normaliza os espaços e preserva o texto original para o prompt. Depois, `interpret_question()` ([`retrieval/interpret.py`](src/rag/retrieval/interpret.py)) lê, por regras explícitas sobre o texto sem acento, o que a pergunta já diz:
 
-O id do chunk é o SHA-256 de `doc_type|entity_id|chunk_index`. O upsert torna a segunda execução idempotente. Se o texto encolher, até 20 ids seguintes da mesma entidade são apagados.
+- **Nota:** "nota baixa", "reclamação", "insatisfeito", "problema" → notas 1–3. "Elogio", "nota alta", "satisfeito" → notas 4–5. Se a pergunta tem os dois sinais, nenhum filtro é aplicado.
+- **Estado:** nome por extenso ("São Paulo") ou sigla ("SP") → `customer_state`.
+- **Região:** "Nordeste", "Sul", etc. → lista de UFs da região.
+- **Comparação regional:** "qual região tem mais notas baixas" ativa uma contagem por região (`group.py`) sobre uma busca mais ampla (80 candidatos).
+- **Contraste de notas:** uma pergunta que contrapõe notas altas e baixas faz duas buscas separadas (1–3 e 4–5), para um lado não ocupar a lista inteira.
 
-A coleção guarda modelo, provider, chunk, versão do dataset, maior data de compra da população ingerida, horário da ingestão e `sample_size` (`0` = tabela inteira). Modelo ou tamanho de amostra diferentes exigem `--reset`.
+Um filtro enviado pela interface sempre vence o que foi lido no texto.
+
+### 2. Recuperação semântica
+
+A pergunta vira um vetor com o mesmo modelo da ingestão. O Chroma devolve os **40 vizinhos mais próximos** (`candidate_k`) já restritos pelo `where` dos metadados ([`retrieval/filters.py`](src/rag/retrieval/filters.py)). Um intervalo de notas vira `$in`, porque esta versão do Chroma aceita um operador por campo.
+
+### 3. Seleção dos conteúdos mais relevantes
+
+A busca vetorial encontra a vizinhança, mas não garante que o comentário responda à pergunta. Por isso há um segundo estágio ([`retrieval/select.py`](src/rag/retrieval/select.py), [`retrieval/relevance.py`](src/rag/retrieval/relevance.py), [`retrieval/hybrid.py`](src/rag/retrieval/hybrid.py)):
+
+1. **Rerank:** o cross-encoder `mmarco-mMiniLMv2` lê o par (pergunta, comentário) e devolve uma probabilidade de relevância.
+2. **Score híbrido:** `0,7 × (1 − distância) + 0,3 × relevância`. O vetor continua pesando mais, e o cross-encoder corrige a ordem dentro da vizinhança.
+3. **Cortes:** sai o candidato com distância de cosseno acima de **0,75**, o chunk repetido da mesma entidade, o segundo documento do mesmo pedido e tudo que passar do **top 10**. Cada descarte guarda o motivo (`distance`, `duplicate_chunk`, `duplicate_order`, `beyond_k`).
+
+### 4. Construção do contexto
+
+[`generation/context.py`](src/rag/generation/context.py) e [`generation/evidence.py`](src/rag/generation/evidence.py):
+
+- Uma avaliação só entra no contexto se tiver id, texto e nota de 1 a 5.
+- Cada bloco leva só a nota e o comentário (`Nota 1/5\n<comentário>`). Pedido, data, categoria e similaridade ficam fora, para o modelo falar do conteúdo e não dos ids.
+- A UF entra só quando a pergunta é sobre lugar. Em uma comparação regional, os blocos vêm agrupados por região, junto com a contagem já calculada.
+- O limite é de 10 avaliações e 12.000 caracteres.
+- Os últimos 4 turnos da conversa entram como histórico, para perguntas de continuação.
+
+### 5. Geração da resposta
+
+[`generation/prompt.py`](src/rag/generation/prompt.py) e [`generation/ollama.py`](src/rag/generation/ollama.py):
+
+- O prompt de sistema manda responder em pt-BR, em um parágrafo, começando por "As avaliações compartilham". O modelo deve dizer o que se repete e **não inventar causa, quantidade, UF ou região**.
+- O modelo é o `qwen2.5:3b` no Ollama, com `temperature 0.1` e até 320 tokens. A temperatura baixa reduz a variação entre execuções.
+- Pós-processamento:
+  - `without_instruction_echo` remove trechos do prompt que o modelo pequeno às vezes repete;
+  - `without_review_mentions` tira referências a uma avaliação específica;
+  - `drop_repeated_opening` evita repetir a abertura da resposta anterior;
+  - `ground_answer` ([`generation/ground.py`](src/rag/generation/ground.py)) confere frases como "o Norte tem mais problemas". A afirmação só fica se as avaliações citadas mostrarem isso, senão vira uma correção.
+
+## Respostas fundamentadas em evidências
+
+O JSON de `POST /chat` ([`generation/chat.py`](src/rag/generation/chat.py)) devolve a resposta e as avaliações usadas:
+
+```json
+{
+  "answer": "As avaliações compartilham ...",
+  "insufficient_evidence": false,
+  "sources": [
+    {
+      "id": "<sha256 do chunk>",
+      "doc_type": "review",
+      "order_id": "e62c3201015050463bc2e3b6599a6bc5",
+      "review_score": 1,
+      "product_category": "baby",
+      "purchase_date": "2018-02",
+      "score": 0.4775,
+      "excerpt": "Comprei o produto e até o momento não recebi ..."
+    }
+  ]
+}
+```
+
+- `sources` são exatamente as avaliações que foram para o contexto do modelo, na mesma ordem. O insight pode ser rastreado até o pedido e o comentário.
+- `score` é a distância de cosseno: quanto menor, mais próximo.
+- A interface mostra cada fonte como um card com nota, categoria, data, trecho, `order_id` e distância.
+- Sem LLM, `scripts/ask.py` imprime a resposta montada só com os trechos recuperados, para auditar a recuperação isoladamente.
+
+## Perguntas sem evidência suficiente
+
+O sistema não pede ao modelo para responder quando os dados não sustentam uma resposta:
+
+| Situação | Como é detectada | Resultado |
+| --- | --- | --- |
+| Nenhuma avaliação relevante | Todo candidato fica acima da distância 0,75 | Recusa |
+| Evidência insuficiente | Menos de 2 avaliações selecionadas (`min_keep`) ou menos de 2 válidas para o contexto | Recusa |
+| Pergunta fora do escopo | Os vizinhos que ficam longe (distância > 0,75) não passam do corte | Recusa se sobrarem menos de 2 |
+| Filtro que esvazia a base | O `where` do Chroma não devolve nada | Recusa |
+| Afirmação regional sem suporte | `ground_answer` conta as UFs das avaliações | A frase é substituída por uma correção |
+
+A recusa tem texto fixo, vem com `insufficient_evidence: true` e `sources: []`, e **não chama o LLM**:
+
+> Não há avaliações suficientes para responder com base nos comentários recuperados. Nenhuma resposta foi gerada.
+
+O prompt também orienta o modelo a dizer com naturalidade quando as avaliações recuperadas não mostram o que foi perguntado.
+
+## Metadados e exploração contextual (desafio adicional)
+
+Os metadados restringem a busca **antes** da similaridade. Assim, os 40 candidatos já saem do recorte certo, em vez de a busca devolver vizinhos de outras notas que depois seriam descartados.
+
+| Metadado | Como entra | Contribuição para a recuperação |
+| --- | --- | --- |
+| `review_score` | Faixa no filtro da interface, ou lida da pergunta ("insatisfeitos" → 1–3, "elogiam" → 4–5) | Uma pergunta sobre problemas não recebe elogios parecidos no texto (ex.: "entrega rápida" vs. "entrega atrasada") |
+| `product_category` | Filtro da interface | Permite "o que elogiam em cama, mesa e banho" sem misturar categorias |
+| `purchase_year` | Filtro da interface | Recorta o período da compra |
+| `customer_state` / região | Lida da pergunta ("em São Paulo", "no Nordeste") | Perguntas regionais e comparações entre regiões com contagem por nota |
+| `doc_type` | Filtro da interface | Separa comentários (`review`) de resumos agregados, que competiam com as reclamações nas buscas sobre entrega |
+
+Os campos `delivery_delay_days`, `order_status`, `total_value` e `seller_state` já estão indexados e podem virar filtros novos sem reingestão.
+
+## Principais decisões técnicas
+
+| Decisão | Alternativa considerada | Justificativa |
+| --- | --- | --- |
+| Texto em linguagem natural por entidade | Indexar a linha do CSV | O embedding captura frases melhor do que colunas soltas, e o pedido reúne item, prazo e avaliação |
+| Documento `review` separado do `order` | Só pedidos | Deixa o comentário dominar o vetor. As perguntas do desafio são sobre o que o cliente escreveu |
+| Embedding multilingual local (MiniLM-L12) | Modelo em inglês ou API paga | Os comentários estão em pt-BR. Roda na CPU, sem custo e sem enviar dados para fora |
+| Chunk de 1000 com split só acima disso | Chunk fixo pequeno | Quase todo documento cabe inteiro, e cortar um comentário curto tira o sentido dele |
+| Chroma persistente | FAISS, pgvector | Filtro por metadados nativo, persistência em disco e zero infraestrutura |
+| Busca vetorial + rerank com cross-encoder (0,7/0,3) | Só vetor | O vetor acha a vizinhança, mas ordena mal comentários parecidos. O cross-encoder lê a pergunta junto e corrige a ordem |
+| Filtros lidos da pergunta por regra | Pedir ao LLM para extrair filtros | É determinístico, testável e não gasta uma chamada de LLM. Um filtro explícito da interface sempre vence |
+| Corte de distância 0,75 e mínimo de 2 avaliações | Responder sempre com o top-k | Uma resposta sustentada por 0 ou 1 comentário distante é alucinação disfarçada. Recusar é melhor |
+| LLM local `qwen2.5:3b` com temperatura 0,1 | GPT/Claude via API | Reprodutível offline e sem chave. A temperatura baixa mantém a resposta presa ao contexto |
+| Contexto só com nota e comentário | Mandar o documento inteiro | O modelo pequeno repetia ids e datas em vez de resumir as reclamações |
+| Checagem pós-geração (`ground_answer`) | Confiar no texto do LLM | Afirmações comparativas são o tipo de alucinação mais comum. Elas são conferidas contra as UFs das fontes |
+| Servidor `http.server` da biblioteca padrão | FastAPI | Uma rota só, sem dependência extra |
 
 ## Instalação e execução
 
+### Pré-requisitos
+
+- Python 3.11+ (testado com 3.12.3)
+- Node 20+ (testado com 24.13.1), só para a interface
+- [Ollama](https://ollama.com/download), só para a geração com LLM
+- Espaço em disco para o `torch` (o wheel fixado traz bibliotecas CUDA, mas a inferência usa a CPU)
+
+### 1. Dados
+
+Baixe o [dataset no Kaggle](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce/data) e coloque os nove CSV em `data/raw/` (detalhes em [`data/raw/README.md`](data/raw/README.md)).
+
+### 2. Ambiente Python
+
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r requirements.txt
+make install
+```
+
+```bash
 cp .env.example .env
 ```
 
-O `make install` cria o virtualenv e instala o mesmo `requirements.txt`. Os CSV precisam já estar em `data/raw/`.
+O `make install` cria `.venv` e instala o `requirements.txt`.
 
-| Comando | Efeito |
-| --- | --- |
-| `make profile` | Regenera `docs/data_profile.md` |
-| `make test` | Roda o pytest nos fixtures, sem baixar modelo e sem ler `data/raw/` |
-| `make ingest-sample` | Ingere 1.000 pedidos (`--sample 1000`, semente 42) |
-| `make ingest-full` | Ingere todos os pedidos |
-| `make inspect` | Estatísticas da coleção e três buscas de sanidade |
-
-Equivalentes diretos:
+### 3. Ingestão
 
 ```bash
-.venv/bin/python scripts/profile_data.py
-.venv/bin/python -m pytest
-.venv/bin/python scripts/ingest.py --sample 1000
-.venv/bin/python scripts/ingest.py
-.venv/bin/python scripts/inspect_collection.py
+make ingest-sample
 ```
 
-Nesta máquina, em 25/10/2026, `scripts/ingest.py --sample 1000` levou **36,6 s** de ponta a ponta, com o download do modelo na mesma execução. O embedding e o upsert dos 1.495 chunks levaram cerca de 16,6 s (três lotes, cerca de 90 chunks/s). A carga completa não foi executada. Uma conta a partir do perfil, se toda categoria nomeada aparecer em algum pedido, dá 99.441 pedidos + 40.950 avaliações com comentário + 73 categorias + 1 grupo sem categoria + 27 UFs = 140.492 documentos. Nessa taxa, só o embedding ficaria em torno de **26 minutos** com o modelo já em cache. É extrapolação, não medição. A primeira execução ainda inclui o download do modelo.
-
-Depois da amostra, `make ingest-full` para de propósito: a coleção está com `sample_size=1000`. A carga inteira pede outra população:
+O comando acima ingere uma amostra de 1.000 pedidos (semente 42) em cerca de 40 s. Para a base completa (cerca de 140 mil documentos, por volta de 26 min de embedding na CPU pela taxa medida na amostra):
 
 ```bash
 .venv/bin/python scripts/ingest.py --reset
 ```
 
-## Reprodutibilidade
-
-- Python 3.12.3 no ambiente em que os pinos foram gerados.
-- `requirements.txt` é o `pip freeze` desse virtualenv.
-- Semente `RANDOM_SEED=42` para `--sample`.
-- Modelo, lote, chunk e flags estão em [`.env.example`](.env.example).
-- Comandos: `make test`, `make ingest-sample`, `make inspect`.
-- Frontend: `cd frontend && npm install && npm run build`. O `package-lock.json` trava as versões.
-
-`make test` passou com 20 testes depois da implementação.
-
-## Verificação da coleção
-
-Saída padrão de `scripts/inspect_collection.py` sobre a amostra de 1.000 pedidos (os logs do carregamento do modelo vão para o stderr e não entram aqui). O `score` é a distância do Chroma no espaço cosseno: quanto menor, mais próximo. `dataset_as_of` é a compra mais recente **dessa amostra** (`2018-10-01T15:30:09`). No extrato completo a última compra é `2018-10-17 17:30:18`.
-
-```text
-collection: olist_ecommerce
-persist_directory: /home/porto/Documents/estudos/tech-challenge-fase4/data/chroma
-count: 1495
-metadata:
-  chunk_overlap: 150
-  chunk_size: 1000
-  dataset_as_of: 2018-10-01T15:30:09
-  dataset_version: brazilian-ecommerce-olist
-  distance_space: cosine
-  embedding_model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-  embedding_provider: huggingface
-  hnsw:space: cosine
-  ingested_at: 2026-10-25T16:05:13+00:00
-  sample_size: 1000
-documents per doc_type:
-  order: 1000
-  review: 418
-  category_summary: 51
-  state_summary: 26
-
-query: entrega atrasada
-  1. score=0.4271 doc_type=order order_id=0a472c47d928bf4cd8b6a7a30345eeb7 review_score=3
-     Order 0a472c47d928bf4cd8b6a7a30345eeb7 placed on 2018-08-30 by a customer from sumare/SP. Status: canceled. Payment: voucher in 1 installment, total R$ 490.99. Estimated delivery: 2018-10-02. Review score: 3/5. Review title: Produto com ...
-  2. score=0.4341 doc_type=state_summary order_id= review_score=5
-     Customer state RN: 4 orders. Average review score: 4.50/5. Average delivery delay: -23.2 days. Average order value: R$ 302.66.
-  3. score=0.4382 doc_type=state_summary order_id= review_score=4
-     Customer state AL: 2 orders. Average review score: 4.00/5. Average delivery delay: 0.5 days. Average order value: R$ 167.27.
-
-query: produto veio com defeito
-  1. score=0.4775 doc_type=review order_id=e62c3201015050463bc2e3b6599a6bc5 review_score=1
-     Review score: 1/5 on order e62c3201015050463bc2e3b6599a6bc5, placed on 2018-02-27 by a customer from rio de janeiro/RJ. Items: baby (bebes). Seller from sao paulo/SP. Review comment: Comprei o produto e até o momento não recebi e também ...
-  2. score=0.4867 doc_type=review order_id=5075b9e252eb0b3f1350f282c94a82b0 review_score=1
-     Review score: 1/5 on order 5075b9e252eb0b3f1350f282c94a82b0, placed on 2017-11-24 by a customer from mogi das cruzes/SP. Items: bed_bath_table (cama_mesa_banho). Seller from ibitinga/SP. Review comment: O produto veio errado não tive nen...
-  3. score=0.5234 doc_type=review order_id=141d3bf5aa7128f40bf2a60cef620b93 review_score=1
-     Review score: 1/5 on order 141d3bf5aa7128f40bf2a60cef620b93, placed on 2018-05-02 by a customer from sao paulo/SP. Items: computers_accessories (informatica_acessorios). Seller from maringa/PR. Review title: zero estrela. Review comment:...
-
-query: pagamento com boleto
-  1. score=0.3852 doc_type=order order_id=65c599e3998c4243f4e62affbf5bcdd7 review_score=5
-     Order 65c599e3998c4243f4e62affbf5bcdd7 placed on 2018-08-19 by a customer from bambui/MG. Status: delivered. Items: 1x sports_leisure (esporte_lazer) sold by seller from santo andre/SP for R$ 112.49 + R$ 18.89 freight. Payment: credit_ca...
-  2. score=0.3927 doc_type=order order_id=f9d6e4f177c33d17573279292f1473e4 review_score=4
-     Order f9d6e4f177c33d17573279292f1473e4 placed on 2017-08-30 by a customer from rio de janeiro/RJ. Status: delivered. Items: 1x sports_leisure (esporte_lazer) sold by seller from ribeirao preto/SP for R$ 133.00 + R$ 16.69 freight. Payment...
-  3. score=0.3932 doc_type=order order_id=0a472c47d928bf4cd8b6a7a30345eeb7 review_score=3
-     Order 0a472c47d928bf4cd8b6a7a30345eeb7 placed on 2018-08-30 by a customer from sumare/SP. Status: canceled. Payment: voucher in 1 installment, total R$ 490.99. Estimated delivery: 2018-10-02. Review score: 3/5. Review title: Produto com ...
+```bash
+make inspect
 ```
 
-## Frontend do chat
+O `make inspect` mostra a contagem por `doc_type` e três buscas de sanidade.
 
-Interface em `frontend/` para conversar com a base. Os detalhes (estrutura, contrato completo e modo mock) estão em [`frontend/README.md`](frontend/README.md).
+### 4. LLM
 
 ```bash
-cd frontend
-npm install
-cp .env.example .env
-npm run dev
+ollama pull qwen2.5:3b
 ```
 
-Abra http://localhost:5173. Com `VITE_USE_MOCK=true` (o padrão), as respostas são simuladas e vêm de avaliações fictícias. Com `false`, o Vite repassa `POST /chat` para `API_PROXY_TARGET` (padrão `http://localhost:8000`).
+Deixe o Ollama aberto. Outro modelo pode ser usado com `OLLAMA_MODEL=<modelo>`.
 
-O que a tela cobre, ligado aos requisitos do desafio:
+### 5. API
 
-- **Respostas com evidências:** cada resposta lista as fontes recuperadas (nota, categoria, data, trecho, `order_id` e distância). As citações `[n]` no texto apontam para elas.
-- **Evidência insuficiente:** quando o backend devolve `insufficient_evidence: true`, a resposta aparece com um aviso.
-- **Metadados:** filtros por tipo de documento, faixa de nota, categoria e ano, com os mesmos nomes dos metadados da coleção (`doc_type`, `review_score`, `product_category`, `purchase_year`).
+```bash
+PYTHONPATH=src .venv/bin/python scripts/serve_chat.py
+```
 
-Resumo do contrato que o backend deve implementar:
+Na primeira execução, o cross-encoder é baixado do Hugging Face. O servidor fica em `POST http://127.0.0.1:8000/chat`.
+
+### 6. Interface
+
+```bash
+cd frontend && npm install && cp .env.example .env
+```
+
+Em `frontend/.env`, defina `VITE_USE_MOCK=false` para usar a API real. Depois:
+
+```bash
+cd frontend && npm run dev
+```
+
+Abra http://localhost:5173. O Vite repassa `/chat` para a porta 8000.
+
+### Ferramentas de linha de comando
+
+| Comando | O que faz |
+| --- | --- |
+| `make test` | Roda a suíte do pytest sobre os fixtures, sem baixar modelo e sem ler `data/raw/` |
+| `make profile` | Regenera [`docs/data_profile.md`](docs/data_profile.md) |
+| `make retrieve QUESTION='"..."'` | Mostra o JSON da recuperação e o prompt que iria para o LLM |
+| `PYTHONPATH=src .venv/bin/python scripts/ask.py "..."` | Responde citando só os trechos recuperados, sem LLM |
+| `make evaluate` | Métricas da recuperação em perguntas fixas |
+
+Teste rápido da API:
+
+```bash
+curl -s localhost:8000/chat -H 'Content-Type: application/json' -d '{"question":"O que os clientes relatam sobre atraso na entrega?"}'
+```
+
+## Exemplos de perguntas e respostas
+
+As perguntas abaixo são as do enunciado. A coluna "Filtro aplicado" mostra o que `interpret_question` lê de cada uma antes da busca.
+
+| Tipo de investigação | Pergunta | Filtro aplicado |
+| --- | --- | --- |
+| Reclamações | Quais são os principais problemas relatados pelos clientes? | `review_score` 1–3 ("problemas") |
+| Tema específico | O que os clientes relatam sobre problemas relacionados à entrega? | `review_score` 1–3 |
+| Experiências positivas | Quais aspectos da experiência de compra são mais elogiados? | `review_score` 4–5 ("elogiados") |
+| Insatisfação | Quais padrões aparecem nas avaliações de clientes insatisfeitos? | `review_score` 1–3 ("insatisfeitos") |
+| Evidências | Quais avaliações sustentam que há problemas recorrentes no prazo de entrega? | `review_score` 1–3 |
+| Recorte geográfico | Em São Paulo, quais são os motivos de nota baixa? | `customer_state=SP`, `review_score` 1–3 |
+| Comparação regional | Qual região tem mais notas baixas, Norte ou Sul? | Contagem por região sobre 80 candidatos |
+| Fora do escopo | Qual a previsão do tempo para amanhã? | Nenhum. Espera-se recusa se nenhum vizinho ficar abaixo da distância 0,75 |
+
+### Recuperação real sobre a amostra
+
+A saída abaixo é de `scripts/inspect_collection.py` sobre a amostra de 1.000 pedidos. São os três primeiros vizinhos para "produto veio com defeito":
 
 ```text
-POST /chat
-  { question, history[], filters{ doc_type?, review_score_min?, review_score_max?, product_category?, purchase_year? } }
-→ { answer, insufficient_evidence, sources[{ id, doc_type, order_id, review_score, product_category, purchase_date, score, excerpt }] }
+1. score=0.4775 doc_type=review review_score=1
+   Review comment: Comprei o produto e até o momento não recebi e também ...
+2. score=0.4867 doc_type=review review_score=1
+   Review comment: O produto veio errado não tive nen...
+3. score=0.5234 doc_type=review review_score=1
+   Review title: zero estrela. Review comment: ...
 ```
+
+Todos são avaliações com nota 1 e comentário em português, que é o tipo de evidência que vai para o contexto do LLM.
+
+### Respostas geradas
+
+<!-- Cole aqui as respostas reais de POST /chat (answer + 2 ou 3 sources) para as perguntas da tabela acima, obtidas com a base completa e qwen2.5:3b. -->
+
+_A preencher com a saída real de `POST /chat`._
+
+### Pergunta sem evidência
+
+```json
+{
+  "answer": "Não há avaliações suficientes para responder com base nos comentários recuperados. Nenhuma resposta foi gerada.",
+  "insufficient_evidence": true,
+  "sources": []
+}
+```
+
+## Avaliação da recuperação
+
+`make evaluate` ([`scripts/evaluate.py`](scripts/evaluate.py)) roda perguntas fixas e mede, sem LLM e sem rótulo manual:
+
+- **acerto:** fração das avaliações selecionadas que contém ao menos um termo esperado (ex.: "atraso", "demorou", "não recebi" para a pergunta de entrega);
+- **sim.:** similaridade média (`1 − distância`) das selecionadas;
+- **filtros:** o que a interpretação aplicou.
+
+É uma métrica de sanidade para comparar mudanças no pipeline (pesos do score híbrido, corte de distância, modelo), não uma avaliação completa de RAG.
+
+A suíte do pytest (`make test`) cobre extração, transformação, documentos, chunking, indexação, filtros, interpretação, seleção, rerank, agrupamento regional, montagem do prompt, recusa, `ground_answer` e o formato de `/chat`. Os modelos são substituídos por embeddings falsos, então os testes rodam offline.
+
+## Reprodutibilidade
+
+- `requirements.txt` é o `pip freeze` do ambiente usado, com Python 3.12.3. O frontend trava as versões no `package-lock.json`.
+- A amostra usa a semente `RANDOM_SEED=42`.
+- Modelo, lote, chunk e flags de documento estão em [`.env.example`](.env.example).
+- Embedding e cross-encoder rodam com `device=cpu`, então o resultado não depende de GPU. O LLM usa `temperature 0.1`.
+- Os ids dos chunks são determinísticos (SHA-256), e a reingestão é idempotente.
+- A coleção grava o modelo de embedding e recusa uma consulta com outro modelo.
+
+Sequência mínima para reproduzir: `make install` → CSV em `data/raw/` → `make ingest-sample` → `make test` → `ollama pull qwen2.5:3b` → `scripts/serve_chat.py` → frontend com `VITE_USE_MOCK=false`.
 
 ## Limitações e próximos passos
 
-A próxima camada é a rota `POST /chat`: recuperar desta coleção, aplicar os filtros recebidos e gerar a resposta seguindo o contrato de [`frontend/README.md`](frontend/README.md). A interface já existe, mas responde só em modo mock. `inspect_collection.py` só mostra que a coleção responde a uma busca por similaridade.
+- A coleção versionada localmente é a **amostra de 1.000 pedidos**. As respostas finais devem usar a base completa (`scripts/ingest.py --reset`).
+- O `qwen2.5:3b` é pequeno: às vezes repete o prompt ou generaliza demais. O pós-processamento cobre os casos vistos, mas não todos. Um modelo maior no Ollama melhora o texto sem mudar o código.
+- A interpretação da pergunta é por regras: ela entende as formulações previstas ("nota baixa", "insatisfeito", UF por nome ou sigla), mas não sinônimos fora da lista.
+- Tipo de pagamento e atraso de entrega ainda não são filtros da interface, embora `delivery_delay_days` já esteja indexado.
+- A avaliação usa termos esperados e similaridade. Um conjunto rotulado (precision@k, faithfulness com LLM-juiz) seria o próximo passo.
+- O `torch` fixado traz as bibliotecas CUDA no download, mesmo com a inferência na CPU.
 
-O que a verificação acima já mostra, e que a recuperação vai precisar tratar:
+## Estrutura do repositório
 
-- A consulta `produto veio com defeito` devolveu avaliações com nota 1 e comentário em português, que é o comportamento útil desse tipo de documento.
-- A consulta `entrega atrasada` colocou resumos de UF na 2ª e 3ª posições. Esses textos repetem a frase "Average delivery delay", então competem com pedidos individuais. Na recuperação, filtrar `doc_type` separa os resumos das reclamações.
-- A consulta `pagamento com boleto` devolveu pedidos pagos com cartão e voucher. O tipo de pagamento está só no texto, e as frases são quase iguais. Um filtro por tipo de pagamento ainda não existe no metadado.
-- Os agregados e a data `dataset_as_of` da coleção atual descrevem os 1.000 pedidos sorteados, não o extrato inteiro.
-- A geolocalização não está no índice.
-- O `torch` pinado é o wheel resolvido pelo pip nesta máquina e traz bibliotecas CUDA. O código pede `device=cpu`. A reinstalação baixa esse conjunto grande de pacotes.
-
-Para indexar o extrato inteiro por cima da amostra, use `--reset`.
+```text
+.
+├── data/
+│   ├── raw/                 # CSV da Olist (não versionados)
+│   ├── processed/           # documents.parquet
+│   └── chroma/              # coleção vetorial persistente
+├── docs/
+│   ├── data_profile.md      # perfil medido do dataset
+│   └── ingestion.md         # desenho da ingestão
+├── frontend/                # chat em Vite + TypeScript + daisyUI
+├── scripts/
+│   ├── profile_data.py      # gera docs/data_profile.md
+│   ├── ingest.py            # CSV → documentos → Chroma
+│   ├── inspect_collection.py
+│   ├── retrieve.py          # recuperação + prompt, sem LLM
+│   ├── ask.py               # resposta só com trechos, sem LLM
+│   ├── evaluate.py          # métricas da recuperação
+│   └── serve_chat.py        # API POST /chat
+├── src/rag/
+│   ├── config.py
+│   ├── ingestion/           # extract, transform, documents, chunking, indexer
+│   ├── retrieval/           # interpret, filters, retrieve, relevance, hybrid, select, group, payload, metrics
+│   └── generation/          # evidence, context, prompt, ollama, ground, answer, chat
+├── tests/                   # pytest + fixtures CSV
+├── Makefile
+├── requirements.txt
+└── .env.example
+```
